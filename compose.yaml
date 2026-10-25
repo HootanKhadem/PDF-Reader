@@ -1,0 +1,49 @@
+services:
+  library:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./books:/books:ro
+      - library-data:/data
+      - model-cache:/models
+      - uploaded-books:/uploads
+    environment:
+      BOOKS_DIR: /books
+      DATA_DIR: /data
+      EMBEDDING_MODEL: intfloat/multilingual-e5-small
+      RERANK_MODEL: cross-encoder/ms-marco-MiniLM-L-6-v2
+      OCR_LANGUAGE: eng
+      BOOK_UPLOAD_DIR: /uploads
+      OCR_WORKERS: "8"
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333; printf 'GET /readyz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3; IFS= read -r qdrant_reply <&3; [[ $$qdrant_reply == *' 200 '* ]]"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 12
+    restart: unless-stopped
+volumes:
+  library-data:
+  model-cache:
+  uploaded-books:
+  qdrant-data:
