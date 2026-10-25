@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+data/
+tmp/
+/books/
+*.pdf
+.idea/
+/docs/*-preview.png

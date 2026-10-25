@@ -1,0 +1,10 @@
+*.pdf
+.git
+__pycache__
+.pytest_cache
+output
+tmp
+graphify-out
+books/
+.idea/
+docs/*-preview.png
