@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Book search</title>
+<style>
+:root{font-family:system-ui;color:#e6edf3;background:#101820;color-scheme:dark}body{max-width:1000px;margin:48px auto;padding:0 24px}h1{font-size:40px;margin-bottom:8px}p{color:#aebfcf;line-height:1.6}form,.toolbar{display:flex;gap:12px;flex-wrap:wrap;margin:24px 0}input,select,button{font:inherit;border:1px solid #405367;border-radius:8px;padding:12px;background:#192937;color:inherit}input{flex:1;min-width:220px}button{cursor:pointer;background:#266b65}button:disabled{opacity:.5;cursor:wait}article{background:#192937;border:1px solid #304555;border-radius:12px;padding:24px;margin:16px 0}article p{white-space:pre-wrap;color:#e6edf3}a{color:#78d5ca}small{color:#aebfcf}#status{white-space:pre-wrap;color:#aebfcf}.tag{color:#78d5ca}label{display:flex;align-items:center;gap:8px}details{margin-top:16px}pre{white-space:pre-wrap;overflow-wrap:anywhere}h2{font-size:18px}
+</style>
+<style>*{box-sizing:border-box}select{max-width:100%;min-width:0}#books{width:100%;text-overflow:ellipsis}#indexstatus{white-space:pre-wrap;overflow-wrap:anywhere}article{overflow-wrap:anywhere}</style>
+<style>#onboarding{background:#15332f;border:1px solid #357c71;border-radius:12px;padding:24px;margin:24px 0}#onboarding h2{font-size:24px;margin-top:0}#onboarding p,#onboarding li{color:#d8ebe6;line-height:1.6}#onboarding[hidden]{display:none}input:disabled{opacity:.6}</style>
+<h1>Find ideas inside your books.</h1>
+<p>Describe a concept in your own words. Get relevant passages, then open the original page.</p>
+<div class="toolbar"><button id="addbook">Add PDF</button><input type="file" id="pdffile" accept="application/pdf,.pdf" hidden><button id="ingest">Re-index books</button><select id="books" aria-label="Book"><option value="">All books</option></select><label>Text budget <select id="budget"><option>800</option><option selected>1500</option><option>3000</option></select></label></div>
+<section id="onboarding" hidden aria-labelledby="onboarding-title" aria-live="polite"><h2 id="onboarding-title"></h2><p id="onboarding-message"></p><ol id="onboarding-steps"></ol><button id="onboarding-action">Upload PDF</button></section>
+<form id="search"><input id="query" aria-label="Search query" required maxlength="2000" disabled placeholder="Add and index a PDF to start searching"><button id="submit" disabled>Search books</button></form>
+<p id="examples" hidden><small>Try: “keeping a spell active while taking damage” · “monsters that turn victims into stone”</small></p>
+<div id="indexstatus" role="status" aria-live="polite"></div><div id="status" role="status" aria-live="polite"></div><main id="results"></main>
+<script>
+const $=id=>document.getElementById(id);
+let hasBooks=false, guidance=null, jobRunning=false, uploading=false, searching=false, pollTimer=null, guidanceView='';
+async function api(url,options){const r=await fetch(url,options);if(!r.ok){const error=await r.json().catch(()=>({detail:r.statusText}));throw Error(typeof error.detail==='string'?error.detail:'Check the request inputs and try again.')}return r.json()}
+function element(tag,text,parent){const e=document.createElement(tag);e.textContent=text;if(parent)parent.append(e);return e}
+function controls(){const busy=jobRunning||uploading;$('ingest').disabled=busy;$('addbook').disabled=busy;$('onboarding-action').disabled=busy;$('query').disabled=!hasBooks;$('books').disabled=!hasBooks;$('submit').disabled=!hasBooks||searching;$('examples').hidden=!hasBooks;$('query').placeholder=hasBooks?'How can a character stop an enemy from moving?':'Add and index a PDF to start searching'}
+function renderGuidance(){
+  if(!guidance){$('onboarding').hidden=true;return}
+  const preparing=!hasBooks&&(jobRunning||uploading);
+  const view=JSON.stringify([guidance,preparing]);if(view===guidanceView)return;guidanceView=view;
+  $('onboarding').hidden=!preparing&&!guidance.message;if($('onboarding').hidden)return;
+  let title,message,steps=[],action=guidance.suggested_action;
+  if(preparing){title='Preparing your first book';message='Your material is being prepared. Search becomes available when indexing finishes.';steps=['Keep this page open to see progress.','Then ask a question or describe a concept.'];action=null}
+  else if(guidance.state==='empty'){title='Add your first PDF';message=guidance.message;steps=['Choose Upload PDF and select your material.','Wait for local indexing to finish.','Ask a question or describe a concept you want to find.']}
+  else if(guidance.state==='needs_indexing'){title='Prepare your books for search';message=guidance.message;steps=['Choose Index PDFs to prepare the available books.','Wait for indexing to finish.','Search by meaning, even without the exact wording.']}
+  else{title=action==='ingest'?'New PDFs are waiting':'Restore original PDFs';message=guidance.message}
+  $('onboarding-title').textContent=title;$('onboarding-message').textContent=message;
+  $('onboarding-steps').replaceChildren();steps.forEach(step=>element('li',step,$('onboarding-steps')));$('onboarding-steps').hidden=!steps.length;
+  $('onboarding-action').hidden=!action;$('onboarding-action').dataset.action=action||'';
+  $('onboarding-action').textContent=action==='ingest'?'Index PDFs':'Upload PDF';
+}
+async function loadBooks(){const [books,summary]=await Promise.all([api('/books'),api('/library/status')]);const value=$('books').value;$('books').replaceChildren(new Option('All books',''));books.forEach(b=>$('books').add(new Option(`${b.title} (${b.pages} pages)`,b.id)));$('books').value=value;hasBooks=books.length>0;guidance=summary;controls();renderGuidance();return books}
+async function poll(){
+  if(pollTimer){clearTimeout(pollTimer);pollTimer=null}
+  try{const s=await api('/ingest');jobRunning=s.running;controls();renderGuidance();
+    if(s.running){const embedding=s.phase==='embedding';$('indexstatus').textContent=s.phase==='synchronizing_vectors'?'Synchronizing search index…':`Indexing: ${s.file||''}\n${s.phase} ${embedding?s.completed_chunks:s.page||''} / ${embedding?s.total_chunks:s.total_pages||''}`;pollTimer=setTimeout(poll,2000)}
+    else if(s.phase!=='idle'){$('indexstatus').textContent=(s.results||[]).map(r=>`${r.file||'Search index'}: ${r.status==='index_pending'?'saved; search index pending':r.status}${r.chunks?' · '+r.chunks+' passages':''}${r.error?' · '+r.error:''}`).join('\n')+(s.error?'\n'+s.error:'');await loadBooks()}
+  }catch(e){$('indexstatus').textContent=e.message}
+}
+async function startIngestion(){try{await api('/ingest',{method:'POST'});await poll()}catch(e){$('status').textContent=e.message}}
+$('addbook').onclick=()=>$('pdffile').click();
+$('pdffile').onchange=async()=>{const file=$('pdffile').files[0];if(!file)return;uploading=true;controls();renderGuidance();$('indexstatus').textContent='Uploading '+file.name+'…';try{const form=new FormData();form.append('file',file);await api('/books/upload',{method:'POST',body:form});await poll()}catch(e){$('indexstatus').textContent=e.message}finally{uploading=false;$('pdffile').value='';controls();renderGuidance()}};
+$('ingest').onclick=startIngestion;
+$('onboarding-action').onclick=()=>{if($('onboarding-action').dataset.action==='upload')$('pdffile').click();else startIngestion()};
+$('search').onsubmit=async e=>{e.preventDefault();if(!hasBooks)return;searching=true;controls();$('status').textContent='Searching concepts and reranking passages…';$('results').replaceChildren();try{const data=await api('/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:$('query').value,book_id:$('books').value||null,token_budget:Number($('budget').value)})});$('status').textContent=`${data.results.length} passages · ${data.text_tokens} excerpt tokens (metadata extra). Verify source pages; results may be incomplete.`;for(const hit of data.results){const card=element('article','',$('results'));element('h2',hit.title,card);element('small',`PDF page ${hit.page} · label ${hit.label}${hit.section?' · '+hit.section:''}`,card);element('p',hit.text+(hit.truncated?' […]':''),card);const link=element('a','Open original page ↗',card);link.href=hit.source_url;link.target='_blank';link.rel='noopener';const details=element('details','',card);element('summary','Read extracted page',details);details.addEventListener('toggle',async()=>{if(details.open&&!details.dataset.loaded){try{const page=await api(`/books/${hit.book_id}/pages/${hit.page}`);element('pre',page.text+(page.truncated?'\n[Page truncated]':''),details);details.dataset.loaded='1'}catch(e){element('p',e.message,details)}}})}}catch(e){$('status').textContent=e.message}finally{searching=false;controls()}};
+loadBooks().then(poll).catch(e=>$('status').textContent=e.message);
+</script></html>

@@ -63,6 +63,11 @@ def not_found(fn,*args,**kwargs):
         raise HTTPException(404,str(exc)) from exc
 
 
+@app.get('/',include_in_schema=False)
+def home():
+    return FileResponse(Path(__file__).with_name('index.html'))
+
+
 @app.get('/health')
 def health():
     index=core.index_status()
