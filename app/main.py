@@ -28,6 +28,11 @@ async def lifespan(app):
         pass
     initial=core.library_status()
     logging.info('Library startup: %s',initial['message'] or f"{initial['indexed_books']} indexed books available")
+    if os.getenv('WARMUP','1')!='0':
+        try:
+            await asyncio.to_thread(core.warmup)
+        except Exception:
+            logging.exception('Model warmup failed; models will load on first search')
     try:
         await asyncio.to_thread(core.sync_index,prune=True)
         status=await asyncio.to_thread(core.index_status)

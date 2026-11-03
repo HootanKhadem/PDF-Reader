@@ -1,5 +1,6 @@
 """Qdrant REST adapter. SQLite owns text and recoverable embeddings."""
 import os
+import threading
 import uuid
 
 import httpx
@@ -12,10 +13,21 @@ class IndexUnavailable(RuntimeError):
     pass
 
 
+_clients={}
+_clients_lock=threading.Lock()
+
+
+def client():
+    """One keep-alive connection pool per Qdrant URL instead of a new socket per call."""
+    with _clients_lock:
+        if URL not in _clients:
+            _clients[URL]=httpx.Client(base_url=URL,timeout=httpx.Timeout(20,connect=2),trust_env=False)
+        return _clients[URL]
+
+
 def request(method,path,body=None,allow_missing=False):
     try:
-        with httpx.Client(base_url=URL,timeout=httpx.Timeout(20,connect=2),trust_env=False) as client:
-            response=client.request(method,path,json=body)
+        response=client().request(method,path,json=body)
         if allow_missing and response.status_code==404:
             return None
         response.raise_for_status()
