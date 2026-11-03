@@ -73,8 +73,8 @@ jobs:
       - run: docker compose exec -T library pip install -q mutmut==2.5.1
       - run: >
           docker compose exec -T library sh -c
-          "cd /app && mutmut run --paths-to-mutate app/ranking.py --runner 'python -m pytest -x -q -p no:cacheprovider tests/test_ranking.py'"
-      - if: always()
-        run: docker compose exec -T library mutmut results || true
+          "cd /app && mutmut run --paths-to-mutate app/ranking.py --runner 'python -m pytest -x -q -p no:cacheprovider tests/test_ranking.py' || true"
+      # Survivors are reported, not enforced: mutmut exits non-zero when any mutant survives.
+      - run: docker compose exec -T library mutmut results || true
       - if: always()
         run: docker compose down

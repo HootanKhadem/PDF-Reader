@@ -27,9 +27,9 @@ def test_reingest_invalidates_cache(library):
     path,_=library
     bid=core.list_books()[0]['id']
     core.search('turning somebody into rock',bid,rerank=False)
-    assert core.search_cache.get(('turning somebody into rock',bid,5,1500,False)) is not None
+    assert core.search_cache.get(('turning somebody into rock',bid,5,1500,False,0)) is not None
     core.ingest_file(path,force=True)
-    assert core.search_cache.get(('turning somebody into rock',bid,5,1500,False)) is None
+    assert core.search_cache.get(('turning somebody into rock',bid,5,1500,False,0)) is None
 
 
 def test_search_skips_qdrant_sync_roundtrip_when_current(library,monkeypatch):
@@ -114,9 +114,10 @@ def test_neighbors_are_part_of_cache_key(library):
 
 
 def test_rest_neighbors_validation(library):
+    from contextlib import closing
     from fastapi.testclient import TestClient
     from app.main import app
-    with TestClient(app) as client:
+    with closing(TestClient(app)) as client:  # no lifespan: the MCP session manager can start once per process
         assert client.post('/search',json={'query':'basilisk','neighbors':3}).status_code==422
         body=client.post('/search',json={'query':'basilisk petrify','neighbors':1,'rerank':False,'top_k':1}).json()
         assert 'context' in body['results'][0]
