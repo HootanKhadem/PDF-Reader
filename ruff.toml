@@ -1,0 +1,5 @@
+# Correctness lints only (syntax errors, undefined names, unused imports, E7 style traps).
+# The codebase uses a compact style, so formatting is not enforced.
+target-version = "py312"
+[lint]
+select = ["E4", "E7", "E9", "F"]

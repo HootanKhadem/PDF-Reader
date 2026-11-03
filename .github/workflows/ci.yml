@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  # Hard gate, same bar as the obsidian-connector repo. Measured by the first CI run.
+  COVERAGE_MIN: "95"
+
+jobs:
+  commits:
+    name: conventional commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Each commit must follow https://www.conventionalcommits.org, e.g. "feat: add x" or "fix(search): handle y".
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          pattern='(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^)]+\))?!?: .+'
+          bad="$(git log --no-merges --format='%h %s' "$BASE..$HEAD" | grep -Ev "^[0-9a-f]+ $pattern" || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::These commits don't follow Conventional Commits (type: description):"
+            echo "$bad"
+            exit 1
+          fi
+
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check
+
+  test:
+    name: test + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Tests need the real models and Qdrant, so everything runs in the compose stack.
+      - name: Build and start stack
+        run: docker compose up -d --build --wait --wait-timeout 900
+      - name: Tests with coverage gate
+        run: >
+          docker compose exec -T library python -m pytest -q -p no:cacheprovider
+          --cov --cov-config=/app/.coveragerc --cov-fail-under=${COVERAGE_MIN}
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail 200 library qdrant
+      - name: Stop stack
+        if: always()
+        run: docker compose down
+
+  mutants:
+    name: mutation testing (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Scoped to the model-free modules: mutating code that needs real models would take hours.
+      - run: docker compose up -d --build --wait --wait-timeout 900
+      - run: docker compose exec -T library pip install -q mutmut==2.5.1
+      - run: >
+          docker compose exec -T library sh -c
+          "cd /app && mutmut run --paths-to-mutate app/ranking.py --runner 'python -m pytest -x -q -p no:cacheprovider tests/test_ranking.py' || true"
+      # Survivors are reported, not enforced: mutmut exits non-zero when any mutant survives.
+      - run: docker compose exec -T library mutmut results || true
+      - if: always()
+        run: docker compose down

@@ -400,6 +400,13 @@
             "type": "boolean",
             "title": "Rerank",
             "default": true
+          },
+          "neighbors": {
+            "type": "integer",
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Neighbors",
+            "default": 0
           }
         },
         "type": "object",

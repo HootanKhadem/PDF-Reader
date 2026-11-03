@@ -1,0 +1,4 @@
+[
+  {"query": "EXAMPLE: replace with a question you actually ask", "book": "part of the book title or filename", "pages": [1]},
+  {"query": "EXAMPLE: pages are one-based PDF pages, several allowed when the answer spans pages", "book": "part of the book title or filename", "pages": [1, 2]}
+]

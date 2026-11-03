@@ -1,0 +1,5 @@
+[run]
+source = app
+omit = app/__init__.py
+[report]
+show_missing = true

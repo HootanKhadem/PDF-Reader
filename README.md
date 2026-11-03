@@ -89,7 +89,13 @@ Query → Qdrant semantic search + SQLite FTS5 → rank fusion → local reranke
                               browser / REST / MCP agent
 ```
 
-Embeddings understand semantic similarity; keyword search helps preserve exact names and rule terms. Heading boundaries keep individual concepts together; long sections use up to 320 tokens with 48-token overlap. Common English search words are omitted from keyword lookup; prefixes match word variants. A cross-encoder reranks at most 100 candidates. **SQLite** owns text, metadata, FTS keywords, and recovery copies of embeddings. **Qdrant** supplies indexed vector retrieval and book filtering. Queries load only candidate text from SQLite, rather than loading every stored vector into the application.
+Embeddings understand semantic similarity; keyword search helps preserve exact names and rule terms. Heading boundaries keep individual concepts together; long sections use up to 320 tokens with 48-token overlap. Common English search words are omitted from keyword lookup; prefixes match word variants. A cross-encoder reranks at most 40 candidates (`RERANK_CANDIDATES`), seeing each passage's book section heading, and results scoring more than `RERANK_MARGIN` (6.0 logits) below the best are dropped (`FUSION_MIN_RATIO`, 0.45, applies when `rerank` is false). Models are loaded at startup (`WARMUP=0` disables) and repeat searches are cached (`SEARCH_CACHE_SIZE`, 128). These thresholds are untuned defaults: measure them against your own books with the relevance harness below.
+
+**Relevance harness.** Copy `tests/relevance_cases.example.json` to `tests/relevance_cases.json`, list real questions with the one-based PDF pages that answer them, rebuild, then run `docker compose exec -T library python -m tests.evaluate_relevance --compare --verbose`. It reports hit@3, MRR, precision, off-target results per query, and p50/p95 latency for reranked and unreranked search; `--min-mrr` makes it exit non-zero for use as a gate. It measures only your labels, not answer quality.
+
+**Optional faster reranker.** `RERANK_BACKEND=onnx` runs a quantized ONNX build of the reranker (`RERANK_ONNX_FILE`, default `onnx/model_qint8_avx2.onnx`; needs `requirements-onnx.txt` installed in the image and a CPU with AVX2). If loading fails it logs a warning and falls back to PyTorch. Logit scales differ slightly, so re-run the harness and revisit `RERANK_MARGIN`. Not enabled or benchmarked by default.
+
+**Fewer round trips.** `neighbors: 1` on `POST /search` / `search_books` returns adjacent same-page chunks as `context` inside the same token budget. **SQLite** owns text, metadata, FTS keywords, and recovery copies of embeddings. **Qdrant** supplies indexed vector retrieval and book filtering. Queries load only candidate text from SQLite, rather than loading every stored vector into the application.
 
 Qdrant runs at `http://qdrant:6333` inside Docker; its local dashboard is http://localhost:6333/dashboard. The pinned image is `qdrant/qdrant:v1.20.0`; neither database is publicly exposed. Keep the default single application worker, which serializes final book replacement and vector synchronization.
 
@@ -228,3 +234,7 @@ Invoke-RestMethod http://localhost:8000/openapi.json | ConvertTo-Json -Depth 100
 * [MCP Python SDK v1](https://py.sdk.modelcontextprotocol.io/v1/) (dependency pinned below v2)
 
 PyMuPDF has AGPL/commercial licensing; review its terms before redistribution or commercial embedding.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests and pushes to `master`: Conventional Commits check, `ruff check` (correctness lints; formatting is not enforced), the full pytest suite inside the compose stack with a coverage gate (`COVERAGE_MIN`, 95%), and an advisory mutation run (mutmut, `app/ranking.py` only). Run the same locally with `docker compose exec -T library python -m pytest -q -p no:cacheprovider --cov`.

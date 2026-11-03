@@ -1,6 +1,7 @@
 """Local, transactional PDF ingestion and bounded hybrid retrieval."""
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -14,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pymupdf
 from sentence_transformers import CrossEncoder, SentenceTransformer
-from . import extraction, vector_index
+from . import extraction, ranking, vector_index
 
 DATA = Path(os.getenv('DATA_DIR', '/data'))
 BOOKS = Path(os.getenv('BOOKS_DIR', '/books'))
@@ -26,6 +27,7 @@ EXTRACTION_KEY='-'+extraction.VERSION+OCR_KEY
 PIPELINE = 'v3-heading-320-48-' + MODEL + EXTRACTION_KEY
 model_lock = threading.RLock()
 index_lock = threading.RLock()
+search_cache = ranking.ResultCache()
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -45,7 +47,21 @@ def embedder():
 @lru_cache(maxsize=1)
 def reranker():
     with model_lock:
-        return CrossEncoder(RERANK, device='cpu', max_length=512)
+        options=ranking.reranker_options()
+        try:
+            return CrossEncoder(RERANK, device='cpu', max_length=512, **options)
+        except Exception:
+            if not options:
+                raise
+            logging.warning('ONNX reranker unavailable; using the PyTorch reranker',exc_info=True)
+            return CrossEncoder(RERANK, device='cpu', max_length=512)
+
+
+def warmup():
+    """Load both models and run them once so the first real query is not the slow one."""
+    with model_lock:
+        embedder().encode('query: warmup', normalize_embeddings=True)
+        reranker().predict([('warmup', 'warmup')], show_progress_bar=False)
 
 
 def db():
@@ -109,18 +125,23 @@ def sync_index(force=False,prune=False):
                             (book['id'],book['fingerprint'],collection))
             repaired+=1
         if created or repaired or prune or force:
+            search_cache.clear()
             vector_index.prune(collection,[b['id'] for b in books])
             with db() as con:
                 con.execute('DELETE FROM vector_state WHERE book_id NOT IN (SELECT id FROM books)')
         return {'collection':collection,'synced_books':repaired}
 
 
+def pending_books(con,collection):
+    return con.execute('SELECT count(*) FROM books b LEFT JOIN vector_state s ON s.book_id=b.id '
+        'WHERE s.fingerprint IS NULL OR s.fingerprint!=b.fingerprint OR s.collection!=?',(collection,)).fetchone()[0]
+
+
 def index_status():
     collection,_=vector_config()
     with db() as con:
         count=con.execute('SELECT count(*) FROM chunks').fetchone()[0]
-        pending=con.execute('SELECT count(*) FROM books b LEFT JOIN vector_state s ON s.book_id=b.id '
-            'WHERE s.fingerprint IS NULL OR s.fingerprint!=b.fingerprint OR s.collection!=?',(collection,)).fetchone()[0]
+        pending=pending_books(con,collection)
     try:
         info=vector_index.info(collection)
     except vector_index.IndexUnavailable as exc:
@@ -327,6 +348,7 @@ def ingest_file(path, progress=lambda **kw: None, force=False):
             con.executemany('INSERT INTO chunks VALUES (?,?,?,?,?,?,?,?,?,?)', [c+(v,) for c,v in zip(chunks,vectors)])
             con.executemany('INSERT INTO chunks_fts VALUES (?,?)',[(c[0],c[8]) for c in chunks])
             con.execute('DELETE FROM vector_state WHERE book_id=?',(book_id,))
+        search_cache.clear()
         try:
             sync_index()
         except vector_index.IndexUnavailable as exc:
@@ -357,10 +379,25 @@ def public_chunk(row):
         'source_url':f"/books/{row['book_id']}/pdf#page={row['page']}"}
 
 
+def ready_collection():
+    """Collection name without a Qdrant round trip when nothing is pending."""
+    collection,_=vector_config()
+    with db() as con:
+        pending=pending_books(con,collection)
+    if pending:
+        collection=sync_index()['collection']
+    return collection
+
+
 def retrieve(query,qvec,book_id):
     with index_lock:
-        collection=sync_index()['collection']
-        dense=vector_index.query(collection,qvec,book_id,100)
+        collection=ready_collection()
+        try:
+            dense=vector_index.query(collection,qvec,book_id,100)
+        except vector_index.IndexUnavailable:
+            # Collection may have been lost: repair from SQLite once, then retry.
+            collection=sync_index()['collection']
+            dense=vector_index.query(collection,qvec,book_id,100)
         with db() as con:
             con.execute('BEGIN')
             stopwords=set('a an the of in on at to for and or is are be been being was were it its that this these those i me my we you your can could how what when where which who with without after before from into while as by do does did'.split())
@@ -385,26 +422,39 @@ def retrieve(query,qvec,book_id):
             return rows,fused,[cid for cid in candidates if cid in rows]
 
 
-def search(query, book_id=None, top_k=5, token_budget=1500, rerank=True):
+def search(query, book_id=None, top_k=5, token_budget=1500, rerank=True, neighbors=0):
     with db() as con:
         if book_id and not con.execute('SELECT 1 FROM books WHERE id=?',(book_id,)).fetchone():
             raise KeyError('Unknown book')
         has_chunks=con.execute('SELECT 1 FROM chunks LIMIT 1').fetchone()
     if not has_chunks:
         return {'results':[], 'text_tokens':0, 'token_budget':token_budget,'retrieval_backend':'qdrant'}
+    key=(query,book_id,top_k,token_budget,rerank,neighbors)
+    cached=search_cache.get(key)
+    if cached is not None:
+        return cached
+    epoch=search_cache.epoch
+    response=_search(query,book_id,top_k,token_budget,rerank,neighbors)
+    search_cache.put(key,response,epoch)
+    return response
+
+
+def _search(query, book_id, top_k, token_budget, rerank, neighbors=0):
     with model_lock:
         qvec=embedder().encode('query: '+query,normalize_embeddings=True)
     rows,fused,candidates=retrieve(query,qvec,book_id)
-    original=candidates.copy()
     if not candidates:
         return {'results':[], 'text_tokens':0, 'token_budget':token_budget,'retrieval_backend':'qdrant'}
     if rerank:
+        pool=candidates[:ranking.RERANK_CANDIDATES]
         with model_lock:
-            ranks = reranker().predict([(query,rows[i]['text']) for i in candidates],batch_size=16,show_progress_bar=False)
-        candidates = [i for _,i in sorted(zip(ranks,candidates),reverse=True)]
-        relevance = {i:float(s) for s,i in zip(ranks,original)}
+            ranks = reranker().predict([(query,ranking.rerank_text(rows[i]['section'],rows[i]['text'])) for i in pool],
+                                       batch_size=16,show_progress_bar=False)
+        relevance = {i:float(s) for s,i in zip(ranks,pool)}
+        candidates = sorted(pool,key=lambda i:-relevance[i])
     else:
         relevance = fused
+    candidates,weak = ranking.drop_weak(candidates,relevance,rerank)
     results, used, selected = [], 0, []
     for i in candidates:
         row = rows[i]
@@ -421,9 +471,38 @@ def search(query, book_id=None, top_k=5, token_budget=1500, rerank=True):
         used += n
         if len(results)>=top_k:
             break
+    if neighbors and results:
+        used+=add_context(results,neighbors,token_budget-used)
     return {'results':results,'text_tokens':used,'token_budget':token_budget,
             'retrieval_backend':'qdrant',
-            'tokenizer':MODEL,'score_type':'cross_encoder_logit' if rerank else 'reciprocal_rank_fusion'}
+            'tokenizer':MODEL,'score_type':'cross_encoder_logit' if rerank else 'reciprocal_rank_fusion',
+            'weak_matches_omitted':len(results)<top_k and bool(weak)}
+
+
+def add_context(results, neighbors, remaining):
+    """Attach same-page neighbor chunks to each result, using only leftover budget.
+
+    Saves the agent a read_chunk round trip. Chunks overlap by design, so neighbor
+    text can repeat a few sentences of the hit. Returns tokens used.
+    """
+    taken={r['id'] for r in results}
+    used=0
+    with db() as con:
+        for r in results:
+            r['context']=[]
+            rows=con.execute('SELECT id,ordinal,text FROM chunks WHERE book_id=? AND page=? '
+                'AND ordinal BETWEEN ? AND ? AND id!=? ORDER BY ordinal',
+                (r['book_id'],r['page'],r['ordinal']-neighbors,r['ordinal']+neighbors,r['id'])).fetchall()
+            for row in rows:
+                if row['id'] in taken:
+                    continue
+                if remaining-used<32:
+                    return used
+                excerpt,n,cut=truncate(row['text'],remaining-used)
+                r['context'].append({'id':row['id'],'ordinal':row['ordinal'],'text':excerpt,
+                                     'text_tokens':n,'truncated':cut})
+                used+=n
+    return used
 
 
 def read_chunk(chunk_id, neighbors=0):
