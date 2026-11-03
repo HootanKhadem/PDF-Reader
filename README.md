@@ -234,3 +234,7 @@ Invoke-RestMethod http://localhost:8000/openapi.json | ConvertTo-Json -Depth 100
 * [MCP Python SDK v1](https://py.sdk.modelcontextprotocol.io/v1/) (dependency pinned below v2)
 
 PyMuPDF has AGPL/commercial licensing; review its terms before redistribution or commercial embedding.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests and pushes to `master`: Conventional Commits check, `ruff check` (correctness lints; formatting is not enforced), the full pytest suite inside the compose stack with a coverage gate (`COVERAGE_MIN`, 95%), and an advisory mutation run (mutmut, `app/ranking.py` only). Run the same locally with `docker compose exec -T library python -m pytest -q -p no:cacheprovider --cov`.

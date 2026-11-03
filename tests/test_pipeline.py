@@ -1,7 +1,5 @@
 """Real model + SQLite integration tests. No external API stand-ins."""
-import json
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import pymupdf
 import pytest
