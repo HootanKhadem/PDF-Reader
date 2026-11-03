@@ -1,6 +1,7 @@
 """Local, transactional PDF ingestion and bounded hybrid retrieval."""
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -46,7 +47,14 @@ def embedder():
 @lru_cache(maxsize=1)
 def reranker():
     with model_lock:
-        return CrossEncoder(RERANK, device='cpu', max_length=512)
+        options=ranking.reranker_options()
+        try:
+            return CrossEncoder(RERANK, device='cpu', max_length=512, **options)
+        except Exception:
+            if not options:
+                raise
+            logging.warning('ONNX reranker unavailable; using the PyTorch reranker',exc_info=True)
+            return CrossEncoder(RERANK, device='cpu', max_length=512)
 
 
 def warmup():
@@ -414,24 +422,24 @@ def retrieve(query,qvec,book_id):
             return rows,fused,[cid for cid in candidates if cid in rows]
 
 
-def search(query, book_id=None, top_k=5, token_budget=1500, rerank=True):
+def search(query, book_id=None, top_k=5, token_budget=1500, rerank=True, neighbors=0):
     with db() as con:
         if book_id and not con.execute('SELECT 1 FROM books WHERE id=?',(book_id,)).fetchone():
             raise KeyError('Unknown book')
         has_chunks=con.execute('SELECT 1 FROM chunks LIMIT 1').fetchone()
     if not has_chunks:
         return {'results':[], 'text_tokens':0, 'token_budget':token_budget,'retrieval_backend':'qdrant'}
-    key=(query,book_id,top_k,token_budget,rerank)
+    key=(query,book_id,top_k,token_budget,rerank,neighbors)
     cached=search_cache.get(key)
     if cached is not None:
         return cached
     epoch=search_cache.epoch
-    response=_search(query,book_id,top_k,token_budget,rerank)
+    response=_search(query,book_id,top_k,token_budget,rerank,neighbors)
     search_cache.put(key,response,epoch)
     return response
 
 
-def _search(query, book_id, top_k, token_budget, rerank):
+def _search(query, book_id, top_k, token_budget, rerank, neighbors=0):
     with model_lock:
         qvec=embedder().encode('query: '+query,normalize_embeddings=True)
     rows,fused,candidates=retrieve(query,qvec,book_id)
@@ -463,10 +471,38 @@ def _search(query, book_id, top_k, token_budget, rerank):
         used += n
         if len(results)>=top_k:
             break
+    if neighbors and results:
+        used+=add_context(results,neighbors,token_budget-used)
     return {'results':results,'text_tokens':used,'token_budget':token_budget,
             'retrieval_backend':'qdrant',
             'tokenizer':MODEL,'score_type':'cross_encoder_logit' if rerank else 'reciprocal_rank_fusion',
             'weak_matches_omitted':len(results)<top_k and bool(weak)}
+
+
+def add_context(results, neighbors, remaining):
+    """Attach same-page neighbor chunks to each result, using only leftover budget.
+
+    Saves the agent a read_chunk round trip. Chunks overlap by design, so neighbor
+    text can repeat a few sentences of the hit. Returns tokens used.
+    """
+    taken={r['id'] for r in results}
+    used=0
+    with db() as con:
+        for r in results:
+            r['context']=[]
+            rows=con.execute('SELECT id,ordinal,text FROM chunks WHERE book_id=? AND page=? '
+                'AND ordinal BETWEEN ? AND ? AND id!=? ORDER BY ordinal',
+                (r['book_id'],r['page'],r['ordinal']-neighbors,r['ordinal']+neighbors,r['id'])).fetchall()
+            for row in rows:
+                if row['id'] in taken:
+                    continue
+                if remaining-used<32:
+                    return used
+                excerpt,n,cut=truncate(row['text'],remaining-used)
+                r['context'].append({'id':row['id'],'ordinal':row['ordinal'],'text':excerpt,
+                                     'text_tokens':n,'truncated':cut})
+                used+=n
+    return used
 
 
 def read_chunk(chunk_id, neighbors=0):

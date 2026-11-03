@@ -49,3 +49,14 @@ def test_cache_clear_discards_stale_in_flight_write():
 def test_cache_size_zero_disables_caching():
     cache=ranking.ResultCache(size=0)
     assert cache.put('a',{},cache.epoch) is False and cache.get('a') is None
+
+
+def test_reranker_options_default_is_pytorch():
+    assert ranking.reranker_options('torch') == {}
+    assert ranking.reranker_options('') == {}
+
+
+def test_reranker_options_onnx():
+    opts = ranking.reranker_options('ONNX', 'onnx/custom.onnx')
+    assert opts == {'backend': 'onnx', 'model_kwargs': {'file_name': 'onnx/custom.onnx'}}
+    assert ranking.reranker_options('onnx')['model_kwargs']['file_name'].endswith('.onnx')

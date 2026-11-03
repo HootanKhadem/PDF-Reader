@@ -85,3 +85,55 @@ def test_warmup_loads_both_models(monkeypatch):
 
 def test_qdrant_client_is_reused():
     assert vector_index.client() is vector_index.client()
+
+
+def test_neighbors_add_same_page_context_within_budget(library):
+    bid=core.list_books()[0]['id']
+    plain=core.search('basilisk petrify',bid,top_k=1,token_budget=2000,rerank=False)
+    assert 'context' not in plain['results'][0]
+    rich=core.search('basilisk petrify',bid,top_k=1,token_budget=2000,rerank=False,neighbors=2)
+    hit=rich['results'][0]
+    assert hit['context'], 'sample page has several chunks'
+    assert all(c['id']!=hit['id'] for c in hit['context'])
+    expanded={c['id'] for c in core.read_chunk(hit['id'],2)['chunks']}
+    assert {c['id'] for c in hit['context']}<=expanded
+    assert rich['text_tokens']==sum(r['text_tokens']+sum(c['text_tokens'] for c in r['context']) for r in rich['results'])
+    assert rich['text_tokens']<=2000
+
+
+def test_neighbors_never_exceed_budget(library):
+    bid=core.list_books()[0]['id']
+    tight=core.search('basilisk petrify',bid,top_k=1,token_budget=128,rerank=False,neighbors=2)
+    assert tight['text_tokens']<=128
+
+
+def test_neighbors_are_part_of_cache_key(library):
+    bid=core.list_books()[0]['id']
+    core.search('basilisk petrify',bid,top_k=1,rerank=False)
+    assert 'context' in core.search('basilisk petrify',bid,top_k=1,rerank=False,neighbors=1)['results'][0]
+
+
+def test_rest_neighbors_validation(library):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        assert client.post('/search',json={'query':'basilisk','neighbors':3}).status_code==422
+        body=client.post('/search',json={'query':'basilisk petrify','neighbors':1,'rerank':False,'top_k':1}).json()
+        assert 'context' in body['results'][0]
+
+
+def test_onnx_failure_falls_back_to_pytorch(monkeypatch):
+    built=[]
+    class Fake:
+        def __init__(self,name,**kwargs):
+            built.append(kwargs)
+            if 'backend' in kwargs:
+                raise RuntimeError('optimum not installed')
+    monkeypatch.setattr(core,'CrossEncoder',Fake)
+    monkeypatch.setenv('RERANK_BACKEND','onnx')
+    core.reranker.cache_clear()
+    try:
+        assert isinstance(core.reranker(),Fake)
+    finally:
+        core.reranker.cache_clear()
+    assert 'backend' in built[0] and 'backend' not in built[1]
